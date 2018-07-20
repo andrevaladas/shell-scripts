@@ -1,0 +1,242 @@
+#!/bin/bash
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+BLUE='\033[1;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+WLINE=false
+SALT_BASE=/srv/salt
+TOP_FILE=$SALT_BASE/top.sls
+PRG=$0
+
+_usage()
+{
+    echo -e "
+########################################################
+#  ██╗    ██╗ █████╗ ██╗     ██╗  ██╗███████╗██████╗   #
+#  ██║    ██║██╔══██╗██║     ██║ ██╔╝██╔════╝██╔══██╗  #
+#  ██║ █╗ ██║███████║██║     █████╔╝ █████╗  ██████╔╝  #
+#  ██║███╗██║██╔══██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗  #
+#  ╚███╔███╔╝██║  ██║███████╗██║  ██╗███████╗██║  ██║  #
+#   ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝  #
+#  > Salt Profile Walker                               #
+########################################################
+
+Description: 
+  Show in details profiles and required keys that match the argument list
+
+Usage: 
+  ${CYAN}salt-profile-walker ${ORANGE}<[options]> ${CYAN}os:CentOS sfivsfl001${NC}
+
+Options:
+        -p   --pillar        Shows all PILLAR keys
+        -g   --grains        Shows all GRAINS keys
+        -e   --extended      Shows keys(pillar/grains) per file
+        -a   --all           Activate --pillar --grains and --extended opetions
+        -h   --help          Show this message
+" >&2
+    exit 1
+}
+[ $# -lt 1 ] && _usage
+
+spillar='no '
+sgrains='no '
+sextended='no '
+lpillars=()
+lgrains=()
+
+##################################################################    
+#######  "getopts" with: short options  AND  long options  #######
+##################################################################    
+while getopts ':pgeh-A:PGE' OPTION ; do
+  case "$OPTION" in
+    p  ) spillar=yes                            ;;
+    g  ) sgrains=yes                            ;;
+    e  ) sextended=yes                          ;;
+    a  ) spillar=yes;sgrains=yes;sextended=yes  ;;
+    h  ) _usage                                 ;;   
+    -  ) [ $OPTIND -ge 1 ] && optind=$(expr $OPTIND - 1 ) || optind=$OPTIND
+         eval OPTION="\$$optind"
+         OPTARG=$(echo $OPTION | cut -d'=' -f2)
+         OPTION=$(echo $OPTION | cut -d'=' -f1)
+         case $OPTION in
+             --pillar    ) spillar=yes                             ;;
+             --grains    ) sgrains=yes                             ;;
+             --extended  ) sextended=yes                           ;;
+             --help      ) _usage                                  ;;
+             --all       ) spillar=yes;sgrains=yes;sextended=yes   ;; 
+             * )  _usage " Long: >>>>>>>> invalid options (long) " ;;
+         esac
+       OPTIND=1
+       shift
+      ;;
+    ? )  _usage "Short: >>>>>>>> invalid options (short) "  ;;
+  esac
+done
+shift $((OPTIND -1))
+
+##############
+# OUTPUT LINE
+##############
+output()
+{
+  line=$1
+  regex=$2
+  # check and write lines
+  if [[ "$WLINE" = true && -z "$regex" ]]; then
+    if [[ ! -z "$line" && ! $line = *\#* && ! $line =~ \{% ]]; then
+       check_profile "$line"
+    fi
+  fi
+}
+
+#####################
+# LIST PROFILE FILES
+#####################
+check_profile()
+{
+  line="$1"
+  if [[ ! "$line" =~ ^include* ]]; then
+    echo -e "${GREEN}$line${NC}"
+  else
+    echo "$line"
+  fi;
+
+  # remove spaces
+  path=$(echo -e "${line}" | tr -d '[:space:]' | awk '{ sub("^-","",$0)}1')
+  if [ ! -z "${path}" ]; then
+
+    if [[ (! "$path" =~ ^include*) && (! "$path" =~ ^match*) ]]; then
+      FILE="$SALT_BASE/${path}.sls"
+
+      # check keys
+      check_pillar_keys "$FILE"
+      check_grains_keys "$FILE"
+
+      # check if it's another profile file
+      if [[ $line = *profiles* ]]; then
+        tag_include="$(head -n 1 "$FILE")"
+        if [[ $tag_include = include* ]]; then
+          walk_file "$FILE"
+        fi;
+      fi;
+    fi;
+  fi;
+}
+
+#############
+# WALK FILE
+#############
+walk_file()
+{
+  FILE=$1
+  ARGS=$2
+  while IFS='' read -r line || [[ -n "$line" ]]; do
+
+    # search for a REGEX in the line
+    IFS="'" read _ regex _ <<< "$line"
+
+    # write line if valid
+    output "$line" "$regex"
+
+    # check regex and the line
+    if [[ ! -z "$regex" && ! $line =~ \{% ]]; then
+      WLINE=false
+
+      # iterate over all regex arguments
+      for var in "${@}"; do
+
+        # check if some arg matches
+        if [[ "$var" =~ $regex ]]; then
+          WLINE=true
+          echo -e "${CYAN}$regex${NC}"
+        fi
+      done
+    fi
+  done < "$FILE"
+}
+
+###############
+# PILLAR KEYS
+###############
+print_pillar()
+{
+  if [ ! -z "$1" ]; then
+    echo -e "      ${BLUE} pillar: $1${NC}"
+  fi;
+}
+check_pillar_keys()
+{
+  FILE=$1
+
+  if [ "$spillar" = "yes" ]; then 
+
+    local _arr=($(cat $FILE | grep -oP "(?<=pillar\[').*?(?=\'])" | sort -uf))
+    eval lpillars+=($(printf "%q\n" "${_arr[@]}" | sort -u))
+
+    if [ "$sextended" = "yes" ]; then 
+      for key in "${_arr[@]}"
+      do
+        print_pillar "$key"
+      done
+      lpillars=()
+    fi;
+  fi;
+}
+
+###############
+# GRAINS KEYS
+###############
+print_grains()
+{
+  if [ ! -z "$1" ]; then
+    echo -e "      ${PURPLE} grains: $1${NC}"
+  fi;
+}
+check_grains_keys()
+{
+  FILE=$1
+
+  if [ "$sgrains" = "yes" ]; then 
+
+    local _arr=($(cat $FILE | grep -oP "(?<=grains\[').*?(?=\'])" | sort -uf))
+    eval lgrains+=($(printf "%q\n" "${_arr[@]}" | sort -u))
+
+    if [ "$sextended" = "yes" ]; then 
+      for key in "${_arr[@]}"
+      do
+        print_grains "$key"
+      done
+      lgrains=()
+    fi;
+  fi;
+}
+
+check_keys()
+{
+  if [ ${#lpillars[@]} -gt 0 ]; then
+    echo -e "${ORANGE}All PILLAR Keys${NC}"
+
+    eval lpillars=($(printf "%q\n" "${lpillars[@]}" | sort -u))
+    for key in "${lpillars[@]}"
+    do
+      print_pillar "$key"
+    done
+  fi;
+
+  if [ ${#lgrains[@]} -gt 0 ]; then
+    echo -e "${ORANGE}All GRAINS Keys${NC}"
+
+    eval lgrains=($(printf "%q\n" "${lgrains[@]}" | sort -u))
+    for key in "${lgrains[@]}"
+    do
+      print_grains "$key"
+    done
+  fi;
+}
+
+# main function
+walk_file "$TOP_FILE" "$@"
+check_keys
